@@ -311,10 +311,21 @@ async def process_waiting_items() -> None:
         # иначе продолжаем ждать следующего цикла
 
 
+def _source_category(source_name: str) -> str:
+    """'Telegram: world_babymonster' -> 'Telegram', 'YouTube: BABYMONSTER' -> 'YouTube' и т.д."""
+    return source_name.split(":", 1)[0]
+
+
 async def run_daily_autopublish() -> None:
     """Публикует не больше одной "порции" за раз, ровно по числу слотов
     времени, которые уже наступили — это и даёт равномерный разброс
-    4-10 публикаций по всем суткам вместо пачки подряд."""
+    4-10 публикаций по всем суткам вместо пачки подряд.
+
+    Дополнительно: не даёт одному источнику (например Telegram) занять
+    весь день — при выборе следующего поста из очереди предпочитает
+    источник, отличный от предыдущей публикации и ещё не выбравший свою
+    "квоту" (не больше половины дневного лимита на один источник, если
+    в очереди есть альтернативы)."""
     today = date.today()
     now = datetime.now(timezone.utc)
     state = storage.get_daily_state(today)
@@ -338,13 +349,35 @@ async def run_daily_autopublish() -> None:
     if remaining <= 0:
         return
 
-    for row in storage.get_pending(limit=remaining):
-        post = PendingPost(row)
+    today_start = datetime.combine(today, datetime.min.time(), tzinfo=timezone.utc)
+    category_counts: dict[str, int] = {}
+    for row in storage.get_published_since(int(today_start.timestamp())):
+        cat = _source_category(row["source_name"])
+        category_counts[cat] = category_counts.get(cat, 0) + 1
+
+    last_row = storage.get_last_published()
+    last_category = _source_category(last_row["source_name"]) if last_row else None
+    soft_cap = max(1, -(-state["target_count"] // 2))  # источник не больше половины дневного лимита
+
+    for _ in range(remaining):
+        candidates = storage.get_pending(limit=20)
+        if not candidates:
+            break
+
+        def _score(row):
+            cat = _source_category(row["source_name"])
+            return (category_counts.get(cat, 0) >= soft_cap, cat == last_category)
+
+        chosen = min(candidates, key=_score)
+        post = PendingPost(chosen)
         text = format_post(post, channel_handle=CONFIG.target_channel or "@world_pharita")
         try:
             await publisher.publish(post, text)
             storage.mark_pending_published(post.id)
             storage.increment_daily_published(today)
+            cat = _source_category(post.source_name)
+            category_counts[cat] = category_counts.get(cat, 0) + 1
+            last_category = cat
             await asyncio.sleep(3)
         except Exception:
             logger.exception("Не удалось автоматически опубликовать пост %s", post.id)

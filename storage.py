@@ -42,7 +42,8 @@ CREATE TABLE IF NOT EXISTS pending_items (
     found_at INTEGER,
     channel_message_id TEXT,
     display_source TEXT,
-    donor_used INTEGER DEFAULT 0
+    donor_used INTEGER DEFAULT 0,
+    published_at INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_pending_status ON pending_items(status);
 CREATE INDEX IF NOT EXISTS idx_pending_found_at ON pending_items(found_at);
@@ -91,6 +92,7 @@ _MIGRATIONS = [
     "ALTER TABLE pending_items ADD COLUMN display_source TEXT",
     "ALTER TABLE pending_items ADD COLUMN donor_used INTEGER DEFAULT 0",
     "ALTER TABLE daily_state ADD COLUMN slot_times_json TEXT",
+    "ALTER TABLE pending_items ADD COLUMN published_at INTEGER",
 ]
 
 
@@ -198,10 +200,27 @@ class Storage:
     def mark_pending_published(self, item_id: int, channel_message_id: str | None = None) -> None:
         with closing(self._connect()) as conn:
             conn.execute(
-                "UPDATE pending_items SET status = 'published', channel_message_id = ? WHERE id = ?",
-                (channel_message_id, item_id),
+                "UPDATE pending_items SET status = 'published', channel_message_id = ?, published_at = ? "
+                "WHERE id = ?",
+                (channel_message_id, int(time.time()), item_id),
             )
             conn.commit()
+
+    def get_last_published(self) -> sqlite3.Row | None:
+        with closing(self._connect()) as conn:
+            cur = conn.execute(
+                "SELECT * FROM pending_items WHERE status = 'published' "
+                "ORDER BY published_at DESC LIMIT 1"
+            )
+            return cur.fetchone()
+
+    def get_published_since(self, ts: int) -> list[sqlite3.Row]:
+        with closing(self._connect()) as conn:
+            cur = conn.execute(
+                "SELECT * FROM pending_items WHERE status = 'published' AND published_at >= ?",
+                (ts,),
+            )
+            return cur.fetchall()
 
     def get_items_found_since(self, ts: int) -> list[sqlite3.Row]:
         with closing(self._connect()) as conn:
