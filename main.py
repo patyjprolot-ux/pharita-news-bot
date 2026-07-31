@@ -36,6 +36,13 @@ class _HealthCheckHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(b"PHARITA bot is running")
 
+    def do_HEAD(self):
+        # Мониторинги вроде UptimeRobot по умолчанию шлют HEAD, а не GET —
+        # без этого метода сервер отвечает 501 и мониторинг считает сервис "упавшим".
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.end_headers()
+
     def log_message(self, format, *args):
         pass  # не засоряем логи health-check запросами
 
