@@ -1,0 +1,18 @@
+[Unit]
+Description=PHARITA / BABYMONSTER news bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pharitabot
+WorkingDirectory=/opt/pharita_news_bot
+EnvironmentFile=/opt/pharita_news_bot/.env
+ExecStart=/opt/pharita_news_bot/venv/bin/python /opt/pharita_news_bot/main.py
+Restart=on-failure
+RestartSec=15
+StandardOutput=append:/var/log/pharita_news_bot/bot.log
+StandardError=append:/var/log/pharita_news_bot/bot.log
+
+[Install]
+WantedBy=multi-user.target
