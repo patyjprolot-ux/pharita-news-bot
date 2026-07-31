@@ -18,9 +18,11 @@ snscrape @ git+https://github.com/JustAnotherArchivist/snscrape.git
 # --- Instagram — неофициально ---
 instaloader==4.13
 
-# --- TikTok — неофициально, требует Playwright ---
-TikTokApi==6.4.1
-playwright==1.45.0
-
 # --- Weverse — неофициально ---
-Weverse==1.2.4
+Weverse==1.1.8.2
+
+# --- TikTok — неофициально, требует Playwright + браузер (не устанавливается
+# сюда: не работает на Render free tier без системных зависимостей для
+# headless-браузера). Нужен TikTok — используйте VPS/Docker деплой (см.
+# README) и добавьте туда `TikTokApi==7.3.3` и `playwright==1.45.0`
+# отдельно, плюс `playwright install --with-deps chromium`.
