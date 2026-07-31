@@ -40,6 +40,7 @@ import telethon_client
 from config import CONFIG
 from filters import is_important
 from formatter import format_post
+from notifications import notify_source_error
 from pending import PendingPost, serialize_media, short_preview
 from rewrite import rewrite_text
 from sources_factory import build_sources
@@ -51,6 +52,7 @@ logger = logging.getLogger(__name__)
 storage = Storage(CONFIG.db_path)
 publisher = TelegramPublisher(CONFIG.telegram_bot_token, CONFIG.target_channel)
 active_sources: list = []  # заполняется в post_init, после подключения Telethon
+bot_instance = None  # заполняется в post_init — используется для уведомлений админу об ошибках
 
 
 def _is_admin(update: Update) -> bool:
@@ -252,8 +254,9 @@ async def gather_all() -> list:
             items = await source.fetch()
             logger.info("Источник %s вернул %d записей", source.name, len(items))
             all_items.extend(items)
-        except Exception:
+        except Exception as exc:
             logger.exception("Источник %s упал целиком, пропускаем", getattr(source, "name", source))
+            await notify_source_error(bot_instance, getattr(source, "name", str(source)), exc)
     return all_items
 
 
@@ -406,8 +409,9 @@ async def fetch_cycle() -> None:
 async def job_fetch_cycle(context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
         await fetch_cycle()
-    except Exception:
+    except Exception as exc:
         logger.exception("job_fetch_cycle: необработанная ошибка")
+        await notify_source_error(bot_instance, "fetch_cycle", exc)
     storage.purge_old()
 
 
@@ -425,7 +429,8 @@ async def job_hourly_digest(context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def post_init(application: Application) -> None:
-    global active_sources
+    global active_sources, bot_instance
+    bot_instance = application.bot
     authorized = await telethon_client.ensure_connected()
     if not authorized:
         logger.warning(

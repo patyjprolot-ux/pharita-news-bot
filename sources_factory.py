@@ -64,6 +64,7 @@ def build_sources(telethon_client) -> list:
             WeverseSource(
                 email=CONFIG.weverse_email,
                 password=CONFIG.weverse_password,
+                auth_token=CONFIG.weverse_auth_token,
                 community=CONFIG.weverse_community,
             )
         )

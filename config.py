@@ -64,6 +64,8 @@ class Config:
     # Weverse
     weverse_email: str = os.getenv("WEVERSE_EMAIL", "")
     weverse_password: str = os.getenv("WEVERSE_PASSWORD", "")
+    # Bearer-токен из браузера — обходит логин+пароль, если Weverse требует код с почты
+    weverse_auth_token: str = os.getenv("WEVERSE_AUTH_TOKEN", "")
     weverse_community: str = os.getenv("WEVERSE_COMMUNITY", "BABYMONSTER")
 
     # News RSS (Google News агрегатор + произвольные RSS-ленты)
