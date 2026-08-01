@@ -151,7 +151,7 @@ async def show_queue(query) -> None:
     buttons = []
     for row in rows:
         post = PendingPost(row)
-        tag_bit = post.display_source or f"#{post.category_tag}"
+        tag_bit = "↪️ Telegram" if post.forward_message_ids else (post.display_source or f"#{post.category_tag}")
         label = f"{tag_bit} — {short_preview(post, 35)}"
         buttons.append([InlineKeyboardButton(label, callback_data=f"publish:{post.id}")])
     buttons.append([InlineKeyboardButton("◀️ Назад", callback_data="menu:back")])
@@ -174,6 +174,21 @@ def _cleanup_local_media(post: PendingPost) -> None:
                 pass
 
 
+async def _publish_post(post: PendingPost) -> None:
+    """Telegram-контент пересылается нативно (оригинал 1-в-1, без своего
+    оформления) через Telethon-аккаунт (боту для этого не хватает прав в
+    чужом канале-источнике); всё остальное публикуется по нашему шаблону
+    через бота."""
+    if post.forward_message_ids:
+        await telethon_client.forward(
+            post.forward_chat, post.forward_message_ids, CONFIG.target_channel
+        )
+        return
+    text = format_post(post, channel_handle=CONFIG.target_channel or "@world_pharita")
+    await publisher.publish(post, text)
+    _cleanup_local_media(post)
+
+
 async def publish_pending_item(query, item_id: int) -> None:
     row = storage.get_pending_by_id(item_id)
     if not row or row["status"] != "pending":
@@ -181,11 +196,9 @@ async def publish_pending_item(query, item_id: int) -> None:
         return
 
     post = PendingPost(row)
-    text = format_post(post, channel_handle=CONFIG.target_channel or "@world_pharita")
     try:
-        await publisher.publish(post, text)
+        await _publish_post(post)
         storage.mark_pending_published(post.id)
-        _cleanup_local_media(post)
         await query.edit_message_text("✅ Опубликовано вручную.", reply_markup=main_menu_keyboard())
     except Exception:
         logger.exception("Не удалось опубликовать вручную пост %s", item_id)
@@ -214,7 +227,9 @@ def format_digest(rows) -> str:
     lines = ["🩷 <b>Сводка за последний час</b> 🩷", ""]
     for row in rows:
         post = PendingPost(row)
-        if post.media:
+        if post.forward_message_ids:
+            media_mark = "↪️"
+        elif post.media:
             media_mark = "📸" if post.media[0].type.value == "photo" else "🎥"
         else:
             media_mark = "🚫"
@@ -278,11 +293,18 @@ DONOR_SEARCH_WINDOW_SECONDS = 4 * 3600  # ищем текст-донор в пр
 
 
 async def _ingest_item(item) -> None:
-    """Кладёт новую важную новость в очередь: Telegram-медиа без подписи
-    уходит в ожидание текста, остальное — сразу с подобранным источником
-    (и рерайтом, если текст скопирован из Telegram-поста)."""
-    if source_label.needs_hold_for_text(item):
-        storage.add_pending(item, serialize_media(item.media), status="waiting_for_text")
+    """Кладёт новую важную новость в очередь: Telegram-контент пересылается
+    нативно (оригинал 1-в-1, без рерайта и своего оформления — см.
+    forward_message_ids), остальные источники публикуются по нашему шаблону
+    (с подобранным источником и рерайтом, если это применимо)."""
+    if item.forward_message_ids:
+        storage.add_pending(
+            item,
+            media_payload=[],
+            status="pending",
+            forward_chat=item.forward_chat,
+            forward_message_ids=item.forward_message_ids,
+        )
         return
 
     display_source = source_label.compute_display_source(item)
@@ -387,11 +409,9 @@ async def run_daily_autopublish() -> None:
 
         chosen = min(candidates, key=_score)
         post = PendingPost(chosen)
-        text = format_post(post, channel_handle=CONFIG.target_channel or "@world_pharita")
         try:
-            await publisher.publish(post, text)
+            await _publish_post(post)
             storage.mark_pending_published(post.id)
-            _cleanup_local_media(post)
             storage.increment_daily_published(today)
             cat = _source_category(post.source_name)
             category_counts[cat] = category_counts.get(cat, 0) + 1
@@ -403,16 +423,32 @@ async def run_daily_autopublish() -> None:
 
 async def fetch_cycle() -> None:
     items = await gather_all()
-    items = [i for i in items if i.media]
+    items = [i for i in items if i.media or i.forward_message_ids]
     items = [i for i in items if is_important(i)]
     items.sort(key=lambda i: i.published_at)
 
     new_count = 0
     for item in items:
         fingerprint = make_fingerprint(item.title, item.description)
+        media_count = len(item.media) or len(item.forward_message_ids)
+
         if storage.is_duplicate(item.dedup_key, fingerprint):
+            # Та же новость уже была — но если в этой версии больше фото/видео,
+            # дополняем ею ещё не опубликованный пост, а не теряем медиа.
+            # Пересылаемые Telegram-посты не трогаем — это чужой оригинал 1-в-1,
+            # подмешивать в него медиа из другого источника нельзя.
+            if media_count > storage.get_seen_media_count(fingerprint) and not item.forward_message_ids:
+                pending_row = storage.find_pending_by_fingerprint(fingerprint)
+                if pending_row:
+                    storage.update_pending_media(pending_row["id"], serialize_media(item.media))
+                    storage.bump_seen_media_count(fingerprint, media_count)
+                    logger.info(
+                        "Дополнили пост id=%s более полной версией (%d медиа) из %s",
+                        pending_row["id"], media_count, item.source_name,
+                    )
             continue
-        storage.mark_seen(item.dedup_key, fingerprint, item.source_name)
+
+        storage.mark_seen(item.dedup_key, fingerprint, item.source_name, media_count=media_count)
         await _ingest_item(item)
         new_count += 1
     logger.info("Цикл сбора: найдено %d новых важных записей", new_count)

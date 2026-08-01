@@ -24,7 +24,8 @@ CREATE TABLE IF NOT EXISTS seen_items (
     dedup_key TEXT PRIMARY KEY,
     fingerprint TEXT,
     source TEXT,
-    published_at INTEGER
+    published_at INTEGER,
+    media_count INTEGER DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_fingerprint ON seen_items(fingerprint);
 
@@ -43,7 +44,10 @@ CREATE TABLE IF NOT EXISTS pending_items (
     channel_message_id TEXT,
     display_source TEXT,
     donor_used INTEGER DEFAULT 0,
-    published_at INTEGER
+    published_at INTEGER,
+    forward_chat TEXT,
+    forward_message_ids TEXT,
+    fingerprint TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_pending_status ON pending_items(status);
 CREATE INDEX IF NOT EXISTS idx_pending_found_at ON pending_items(found_at);
@@ -93,6 +97,10 @@ _MIGRATIONS = [
     "ALTER TABLE pending_items ADD COLUMN donor_used INTEGER DEFAULT 0",
     "ALTER TABLE daily_state ADD COLUMN slot_times_json TEXT",
     "ALTER TABLE pending_items ADD COLUMN published_at INTEGER",
+    "ALTER TABLE pending_items ADD COLUMN forward_chat TEXT",
+    "ALTER TABLE pending_items ADD COLUMN forward_message_ids TEXT",
+    "ALTER TABLE pending_items ADD COLUMN fingerprint TEXT",
+    "ALTER TABLE seen_items ADD COLUMN media_count INTEGER DEFAULT 0",
 ]
 
 
@@ -131,12 +139,34 @@ class Storage:
             )
             return cur.fetchone() is not None
 
-    def mark_seen(self, dedup_key: str, fingerprint: str, source: str) -> None:
+    def mark_seen(self, dedup_key: str, fingerprint: str, source: str, media_count: int = 0) -> None:
         with closing(self._connect()) as conn:
             conn.execute(
-                "INSERT OR IGNORE INTO seen_items (dedup_key, fingerprint, source, published_at) "
-                "VALUES (?, ?, ?, ?)",
-                (dedup_key, fingerprint, source, int(time.time())),
+                "INSERT OR IGNORE INTO seen_items (dedup_key, fingerprint, source, published_at, media_count) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (dedup_key, fingerprint, source, int(time.time()), media_count),
+            )
+            conn.commit()
+
+    def get_seen_media_count(self, fingerprint: str) -> int:
+        """Максимум фото/видео, виденных под этим отпечатком новости — чтобы
+        понять, стоит ли более новая версия того же события дополнить ещё
+        неопубликованный пост (не терять фото/видео при повторе в другом
+        источнике)."""
+        cutoff = int(time.time()) - FINGERPRINT_TTL_DAYS * 86400
+        with closing(self._connect()) as conn:
+            cur = conn.execute(
+                "SELECT MAX(media_count) AS m FROM seen_items WHERE fingerprint = ? AND published_at >= ?",
+                (fingerprint, cutoff),
+            )
+            row = cur.fetchone()
+            return (row["m"] or 0) if row else 0
+
+    def bump_seen_media_count(self, fingerprint: str, media_count: int) -> None:
+        with closing(self._connect()) as conn:
+            conn.execute(
+                "UPDATE seen_items SET media_count = ? WHERE fingerprint = ? AND media_count < ?",
+                (media_count, fingerprint, media_count),
             )
             conn.commit()
 
@@ -154,13 +184,17 @@ class Storage:
         media_payload: list[dict],
         status: str = "pending",
         display_source: str | None = None,
+        forward_chat: str | None = None,
+        forward_message_ids: list[int] | None = None,
     ) -> int:
+        fingerprint = make_fingerprint(item.title, item.description)
         with closing(self._connect()) as conn:
             cur = conn.execute(
                 "INSERT INTO pending_items "
                 "(dedup_key, source_name, category_tag, title, description, source_url, "
-                " item_published_at, media_json, status, found_at, display_source) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " item_published_at, media_json, status, found_at, display_source, "
+                " forward_chat, forward_message_ids, fingerprint) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     item.dedup_key,
                     item.source_name,
@@ -173,6 +207,9 @@ class Storage:
                     status,
                     int(time.time()),
                     display_source,
+                    forward_chat,
+                    json.dumps(forward_message_ids) if forward_message_ids else None,
+                    fingerprint,
                 ),
             )
             conn.commit()
@@ -186,6 +223,26 @@ class Storage:
                 (limit,),
             )
             return cur.fetchall()
+
+    def find_pending_by_fingerprint(self, fingerprint: str) -> sqlite3.Row | None:
+        """Ещё не опубликованный пост про ту же новость — используется, чтобы
+        дополнить его более полной версией (больше фото/видео), если та же
+        новость нашлась в другом источнике."""
+        with closing(self._connect()) as conn:
+            cur = conn.execute(
+                "SELECT * FROM pending_items WHERE fingerprint = ? AND status = 'pending' "
+                "ORDER BY found_at DESC LIMIT 1",
+                (fingerprint,),
+            )
+            return cur.fetchone()
+
+    def update_pending_media(self, item_id: int, media_payload: list[dict]) -> None:
+        with closing(self._connect()) as conn:
+            conn.execute(
+                "UPDATE pending_items SET media_json = ? WHERE id = ?",
+                (json.dumps(media_payload), item_id),
+            )
+            conn.commit()
 
     def get_pending_by_id(self, item_id: int) -> sqlite3.Row | None:
         with closing(self._connect()) as conn:

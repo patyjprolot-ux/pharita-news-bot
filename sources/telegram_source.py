@@ -7,6 +7,12 @@
 читает публичные посты — это ничем не отличается от обычного чтения канала
 человеком в приложении Telegram.
 
+Публикация постов из Telegram-каналов идёт через НАТИВНУЮ ПЕРЕСЫЛКУ
+(Telegram forward), а не пересказ своими словами — по явному требованию:
+сохранить оригинальный текст, фото/видео и оформление один в один. Поэтому
+здесь НЕ скачиваются никакие файлы — просто запоминаются id сообщений,
+пересылкой занимается telegram_publisher.py в момент публикации.
+
 При первом запуске Telethon попросит авторизацию (номер телефона + код из
 Telegram) прямо в консоли — это разовая операция, дальше используется
 сохранённый файл сессии.
@@ -14,19 +20,15 @@ Telegram) прямо в консоли — это разовая операци�
 from __future__ import annotations
 
 import logging
-import tempfile
-import time
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 
 from filters import guess_category_tag
-from sources.base import BaseSource, MediaItem, MediaType, NewsItem
+from sources.base import BaseSource, NewsItem
 from storage import make_fingerprint
 
 logger = logging.getLogger(__name__)
 
 LOOKBACK_HOURS = 6  # окно, за которое проверяем новые посты при каждом опросе
-TMP_FILE_MAX_AGE_HOURS = LOOKBACK_HOURS + 1  # старше — точно больше не нужен
 
 
 class TelegramChannelSource(BaseSource):
@@ -45,25 +47,11 @@ class TelegramChannelSource(BaseSource):
         self.client = client
         self.channels = channels
         self.mom_usernames = {u.lower().lstrip("@") for u in (mom_usernames or set())}
-        # storage используется, чтобы НЕ скачивать медиа повторно для постов,
-        # которые уже видели на прошлых циклах опроса (без этого /tmp быстро
-        # переполняется — один и тот же пост в окне LOOKBACK_HOURS иначе
-        # перекачивается заново каждые 15 минут, пока не выйдет из окна)
+        # storage используется, чтобы не пересматривать посты, которые уже
+        # видели на прошлых циклах опроса (не тратим время на дубликаты)
         self.storage = storage
-        self._tmp_dir = Path(tempfile.gettempdir()) / "pharita_bot_media"
-        self._tmp_dir.mkdir(parents=True, exist_ok=True)
-
-    def _cleanup_old_files(self) -> None:
-        cutoff = time.time() - TMP_FILE_MAX_AGE_HOURS * 3600
-        try:
-            for f in self._tmp_dir.iterdir():
-                if f.is_file() and f.stat().st_mtime < cutoff:
-                    f.unlink(missing_ok=True)
-        except Exception:
-            logger.exception("Telegram source: не удалось почистить временные файлы")
 
     async def fetch(self) -> list[NewsItem]:
-        self._cleanup_old_files()
         items: list[NewsItem] = []
         cutoff = datetime.now(timezone.utc) - timedelta(hours=LOOKBACK_HOURS)
 
@@ -74,47 +62,63 @@ class TelegramChannelSource(BaseSource):
                 logger.exception("Telegram source: ошибка чтения канала %s", channel)
         return items
 
+    @staticmethod
+    def _group_messages(messages: list) -> list[list]:
+        """Собирает фото-альбомы (несколько сообщений с одним grouped_id) в
+        один "пост" — иначе каждое фото альбома трактуется как отдельная
+        новость и при пересылке уходит только одно фото вместо всех."""
+        groups: dict[int, list] = {}
+        standalone: list[list] = []
+        for m in messages:
+            if m.grouped_id:
+                groups.setdefault(m.grouped_id, []).append(m)
+            else:
+                standalone.append([m])
+        all_groups = list(groups.values()) + standalone
+        for g in all_groups:
+            g.sort(key=lambda m: m.id)
+        return all_groups
+
     async def _fetch_channel(self, channel: str, cutoff: datetime) -> list[NewsItem]:
         results: list[NewsItem] = []
         entity = await self.client.get_entity(channel)
 
-        async for message in self.client.iter_messages(entity, limit=30):
+        raw_messages = []
+        async for message in self.client.iter_messages(entity, limit=40):
             if message.date < cutoff:
                 break
             if not message.text and not message.media:
                 continue
+            raw_messages.append(message)
 
-            text = message.text or ""
+        for group in self._group_messages(raw_messages):
+            if not any(m.photo or m.video for m in group):
+                continue  # без фото/видео не публикуем (общее правило для всех источников)
+
+            text = next((m.text for m in group if m.text), "") or ""
             title, _, rest = text.partition("\n")
             title = title.strip()[:200]
             description = (rest or text).strip()
 
-            dedup_key = f"Telegram: {channel}:{message.id}"
+            first_id = group[0].id
+            dedup_key = f"Telegram: {channel}:{first_id}"
             if self.storage is not None and self.storage.is_duplicate(
                 dedup_key, make_fingerprint(title, description)
             ):
-                continue  # уже публиковали/видели — не тратим трафик и диск на медиа
-
-            media_items = []
-            if message.photo or message.video:
-                media_type = MediaType.VIDEO if message.video else MediaType.PHOTO
-                path = await self.client.download_media(
-                    message, file=str(self._tmp_dir / f"{channel}_{message.id}")
-                )
-                if path:
-                    media_items.append(MediaItem(type=media_type, local_path=path))
+                continue  # уже видели — не обрабатываем повторно
 
             is_mom = channel.lower().lstrip("@") in self.mom_usernames
 
             item = NewsItem(
                 source_name=f"Telegram: {channel}",
-                external_id=str(message.id),
+                external_id=str(first_id),
                 title=title,
                 description=description,
-                source_url=f"https://t.me/{channel}/{message.id}",
-                published_at=message.date,
-                media=media_items,
+                source_url=f"https://t.me/{channel}/{first_id}",
+                published_at=group[0].date,
                 is_priority=is_mom,
+                forward_chat=f"@{channel}",
+                forward_message_ids=[m.id for m in group],
             )
             item.category_tag = guess_category_tag(item)
             results.append(item)

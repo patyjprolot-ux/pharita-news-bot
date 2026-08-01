@@ -34,6 +34,12 @@ class NewsItem:
     category_tag: str = "News"  # для строки "➣ 📸 ┉ #<tag>"
     is_priority: bool = False   # напр. пост мамы Фариты — публикуется всегда
 
+    # Заполняется только для Telegram-источника: если задано, публикация
+    # идёт через нативную пересылку оригинального сообщения (без рерайта,
+    # без своего оформления) вместо обычного форматированного поста.
+    forward_chat: str | None = None
+    forward_message_ids: list[int] = field(default_factory=list)
+
     @property
     def dedup_key(self) -> str:
         return f"{self.source_name}:{self.external_id}"

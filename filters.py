@@ -1,15 +1,20 @@
 """Фильтрация «важности» новости по ключевым словам (без платных LLM).
 
-Логика:
-- PHARITA_KEYWORDS — если ни одного из этих слов нет в тексте, новость
-  почти наверняка не о Фарите/BABYMONSTER вообще -> отбрасываем.
-- TOPIC_KEYWORDS — концерты, туры, интервью, реклама и т.д. Если хотя бы
-  одно совпадение — считаем новость важной.
-- NOISE_KEYWORDS — маркеры "шума", который часто заливает каналы
-  (репосты мемов, фан-арт, голосования, магазин мерча и т.п.) — снижают
-  приоритет, если нет явного совпадения по TOPIC_KEYWORDS.
+Логика (строгая, по требованию: публикуем только то, что реально о PHARITA):
+- PHARITA_KEYWORDS — обязательное условие. Если ни одного из этих слов нет
+  в тексте, новость НЕ публикуется — даже если это новость о BABYMONSTER
+  в целом (концерт, чарт и т.п.), но без явного упоминания Фариты.
+- TOPIC_KEYWORDS используется только для тега категории (Concert/Interview/
+  ...), не как отдельная причина публикации.
+- NOISE_KEYWORDS — маркеры "шума" (фан-арт, голосования, мерч) — такие
+  посты отбрасываются, даже если Фарита упомянута мельком.
 - Посты с аккаунта мамы Фариты (whitelisted username) — публикуются
   ВСЕГДА, независимо от ключевых слов (is_priority=True).
+
+Ограничение (честно, не баг): если пост описывает событие словами вроде
+"все участницы"/"группа" без явного имени "Фарита" — фильтр его не
+пропустит, даже если Фарита там тоже участвует. Различить это без ручного
+просмотра фото/видео (которого у бота нет) невозможно.
 """
 from __future__ import annotations
 
@@ -19,10 +24,6 @@ from sources.base import NewsItem
 
 PHARITA_KEYWORDS = [
     "pharita", "파리타", "farita", "фарита",
-]
-
-GROUP_KEYWORDS = [
-    "babymonster", "베이비몬스터", "бейбимонстр", "baby monster",
 ]
 
 TOPIC_KEYWORDS = [
@@ -53,27 +54,23 @@ def _contains_any(text: str, keywords: list[str]) -> bool:
 
 
 def is_important(item: NewsItem, priority_authors: set[str] | None = None) -> bool:
-    """Возвращает True, если новость стоит публиковать."""
+    """Возвращает True, если новость стоит публиковать.
+
+    Строго: без явного упоминания Фариты в тексте — не публикуем, даже если
+    это новость о BABYMONSTER в целом. Единственное исключение — is_priority
+    (пост с аккаунта мамы Фариты), он всегда проходит."""
     if item.is_priority:
         return True
 
     text = f"{item.title} {item.description}"
 
-    mentions_group_or_star = _contains_any(text, PHARITA_KEYWORDS) or _contains_any(
-        text, GROUP_KEYWORDS
-    )
-    if not mentions_group_or_star:
+    if not _contains_any(text, PHARITA_KEYWORDS):
         return False
 
-    # Прямое упоминание Фариты почти всегда важно, если ещё и есть медиа
-    mentions_pharita = _contains_any(text, PHARITA_KEYWORDS)
-    mentions_topic = _contains_any(text, TOPIC_KEYWORDS)
-    is_noisy = _contains_any(text, NOISE_KEYWORDS) and not mentions_topic
-
-    if is_noisy:
+    if _contains_any(text, NOISE_KEYWORDS) and not _contains_any(text, TOPIC_KEYWORDS):
         return False
 
-    return mentions_pharita or mentions_topic
+    return True
 
 
 def guess_category_tag(item: NewsItem) -> str:

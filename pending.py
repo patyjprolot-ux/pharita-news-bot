@@ -37,6 +37,8 @@ class PendingPost:
         self.found_at: int = row["found_at"]
         self.item_published_at: int = row["item_published_at"]
         self.display_source: str = row["display_source"] or ""
+        self.forward_chat: str | None = row["forward_chat"]
+        self.forward_message_ids: list[int] = json.loads(row["forward_message_ids"] or "[]")
 
 
 def short_preview(item: NewsItem | PendingPost, max_len: int = 90) -> str:

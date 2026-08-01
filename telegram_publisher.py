@@ -65,3 +65,8 @@ class TelegramPublisher:
         if overflow_text:
             # Подпись не влезла в лимит медиа — досылаем полный текст отдельным сообщением
             await self.bot.send_message(chat_id=self.target_channel, text=overflow_text)
+
+    # Пересылка Telegram-контента делается через telethon_client.forward(), не
+    # через бота: Bot API не может переслать сообщение из канала, в котором
+    # бот не состоит участником (даже если канал публичный), а добавлять
+    # бота в чужие каналы-источники мы не можем.
