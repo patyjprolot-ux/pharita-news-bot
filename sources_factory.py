@@ -4,14 +4,16 @@ from __future__ import annotations
 from config import CONFIG
 
 
-def build_sources(telethon_client) -> list:
+def build_sources(telethon_client, storage=None) -> list:
     sources = []
 
     if CONFIG.enable_telegram_source and CONFIG.source_tg_channels:
         from sources.telegram_source import TelegramChannelSource
 
         sources.append(
-            TelegramChannelSource(client=telethon_client, channels=CONFIG.source_tg_channels)
+            TelegramChannelSource(
+                client=telethon_client, channels=CONFIG.source_tg_channels, storage=storage
+            )
         )
 
     if CONFIG.enable_youtube_source and CONFIG.youtube_api_key:

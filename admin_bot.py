@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import random
 from datetime import date, datetime, timezone
 
@@ -161,6 +162,18 @@ async def show_queue(query) -> None:
     )
 
 
+def _cleanup_local_media(post: PendingPost) -> None:
+    """Удаляет локально скачанные файлы после публикации — они уже загружены
+    в Telegram, хранить их дальше только тратит место на диске (важно на
+    хостингах вроде Render с ограниченным /tmp)."""
+    for media in post.media:
+        if media.local_path:
+            try:
+                os.remove(media.local_path)
+            except OSError:
+                pass
+
+
 async def publish_pending_item(query, item_id: int) -> None:
     row = storage.get_pending_by_id(item_id)
     if not row or row["status"] != "pending":
@@ -172,6 +185,7 @@ async def publish_pending_item(query, item_id: int) -> None:
     try:
         await publisher.publish(post, text)
         storage.mark_pending_published(post.id)
+        _cleanup_local_media(post)
         await query.edit_message_text("✅ Опубликовано вручную.", reply_markup=main_menu_keyboard())
     except Exception:
         logger.exception("Не удалось опубликовать вручную пост %s", item_id)
@@ -377,6 +391,7 @@ async def run_daily_autopublish() -> None:
         try:
             await publisher.publish(post, text)
             storage.mark_pending_published(post.id)
+            _cleanup_local_media(post)
             storage.increment_daily_published(today)
             cat = _source_category(post.source_name)
             category_counts[cat] = category_counts.get(cat, 0) + 1
@@ -437,7 +452,7 @@ async def post_init(application: Application) -> None:
             "Telethon-аккаунт не авторизован — Telegram-источник и статистика работать не будут. "
             "Выполни разовый вход (см. README, раздел про Telethon)."
         )
-    active_sources = build_sources(telethon_client.get_client())
+    active_sources = build_sources(telethon_client.get_client(), storage=storage)
     logger.info("Активные источники: %s", ", ".join(s.name for s in active_sources) or "нет")
 
     await application.bot.set_my_commands([BotCommand("menu", "🩷 Открыть меню")])
