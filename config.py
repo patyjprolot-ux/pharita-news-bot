@@ -88,7 +88,7 @@ class Config:
 
     # Переписывание текста, взятого из Telegram-каналов (Google Gemini, бесплатный уровень)
     gemini_api_key: str = os.getenv("GEMINI_API_KEY", "")
-    gemini_model: str = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
+    gemini_model: str = os.getenv("GEMINI_MODEL", "gemini-2.5-flash-lite")
 
     # Медиа-посты из Telegram без подписи: сколько ждать текст из другого
     # источника, прежде чем публиковать просто как "Фото"/"Видео"
